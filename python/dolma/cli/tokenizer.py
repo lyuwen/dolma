@@ -136,6 +136,10 @@ class TokenizationConfig:
         default=False,
         help="If true, only print the configuration and exit without running the taggers.",
     )
+    use_mpi: bool = field(
+        default=False,
+        help="If true, use MPI for parallel computation.",
+    )
 
 
 class TokenizerCli(BaseCli):
@@ -195,5 +199,6 @@ class TokenizerCli(BaseCli):
                 seed=parsed_config.seed,
                 metadata_dir=work_dirs.output,
                 max_size=parsed_config.max_size,
+                use_mpi=parsed_config.use_mpi,
                 debug=parsed_config.debug,
             )

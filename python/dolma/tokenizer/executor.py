@@ -7,16 +7,28 @@ from contextlib import ExitStack
 from math import ceil, log10
 from queue import Queue  # pylint: disable=unused-import
 from typing import Any, Dict, List, Optional
+#
+import time
+import tqdm
+import pickle
+import smart_open
+from threading import Thread
+from datetime import datetime
 
 import numpy as np
 from typing_extensions import TypeAlias
 
 from ..core.loggers import get_logger
 from ..core.parallel import BaseParallelProcessor, QueueType
-from ..core.paths import glob_path, join_path, mkdir_p
+from ..core.paths import glob_path, join_path, mkdir_p, parent
 from .data_types import TokenizerOutput  # pylint: disable=unused-import
 from .memmap_writer import MemmapWriter
 from .tokenizer import Tokenizer, tokenize_file
+
+MPI = None
+comm = None
+rank = 0
+worldsize = 1
 
 TokenizedSeqsQueueType: TypeAlias = "Queue[List[TokenizerOutput]]"
 PathsQueueType: TypeAlias = "Queue[str]"
@@ -156,7 +168,7 @@ class MemMapParallelWriter(BaseParallelProcessor):
 
         cls.increment_progressbar(queue, documents=documents_cnt, tokens=tokens_cnt)
 
-    def __call__(self, num_readers: Optional[int] = None, **process_single_kwargs: Any):
+    def __call__(self, num_readers: Optional[int] = None, use_mpi=False, **process_single_kwargs: Any):
         """Run the processor."""
 
         # get all source paths; shuffle them well
@@ -217,7 +229,10 @@ class MemMapParallelWriter(BaseParallelProcessor):
         all_metadata_path = [join_path(None, metadata, f"{i}.done") for i in range(len(all_destination_paths))]
 
         # finally run the processors
-        fn = self._debug_run_all if self.debug else self._multiprocessing_run_all
+        if use_mpi:
+            fn = self._mpi4py_run_all
+        else:
+            fn = self._debug_run_all if self.debug else self._multiprocessing_run_all
         fn(
             all_source_paths=source_indices,
             all_destination_paths=all_destination_paths,
@@ -225,6 +240,145 @@ class MemMapParallelWriter(BaseParallelProcessor):
             grouped_source_prefixes=grouped_source_prefixes,
             **process_single_kwargs,
         )
+
+
+    @classmethod
+    def _mpi4py_process_single_and_save_status(
+        cls,
+        source_path: str,
+        destination_path: str,
+        metadata_path: str,
+        #  kwargs,
+        serialized_kwargs: bytes,
+        queue: QueueType=None,
+    ):
+        """A wrapper around process single that saves a metadata file if processing is successful."""
+
+        # make destination directory if it doesn't exist for the destination and metadata paths
+        mkdir_p(parent(destination_path))
+        mkdir_p(parent(metadata_path))
+
+        kwargs = pickle.loads(serialized_kwargs)
+        retries_on_error = kwargs.get("retries_on_error", 0) + 1
+        while True:
+            try:
+                cls.process_single(
+                    source_path=source_path, destination_path=destination_path, queue=queue, **kwargs
+                )
+                break
+            except DolmaRetryableFailure as exception:
+                retries_on_error -= 1
+                if retries_on_error == 0:
+                    raise DolmaError from exception
+
+        # write the metadata file
+        with smart_open.open(metadata_path, "wt") as f:
+            f.write(datetime.now().isoformat())
+
+        queue.put(None)
+        counts = [0 for _ in self.increment_progressbar(queue)]
+        while True:
+            item = queue.get()
+            if item is None:
+                break
+
+            for i, value in enumerate(item):
+              counts[i] += value
+        return counts
+
+
+    def _mpi4py_run_all(
+        self,
+        all_source_paths: List[str],
+        all_destination_paths: List[str],
+        all_metadata_paths: List[str],
+        **process_single_kwargs: Any,
+    ):
+        """Run files in parallel using mpi4py.
+
+        Args:
+            all_source_paths (List[MultiPath]): The list of source paths to process.
+            all_destination_paths (List[MultiPath]): The list of destination paths to save.
+            all_metadata_paths (List[MultiPath]): The locations where to save metadata.
+        """
+        with ExitStack() as stack:
+            pbar_queue = Queue()
+            sample_queue_output = self.increment_progressbar(pbar_queue)
+            pbars = [
+                stack.enter_context(
+                    tqdm.tqdm(desc=str(k), unit=str(k)[:1], position=i, unit_scale=True)  # pyright: ignore
+                )
+                for i, k in enumerate(sample_queue_output)
+            ]
+            thread = Thread(
+                target=self._run_mpi_threaded_progressbar, args=(pbar_queue, self.pbar_timeout), daemon=True
+            )
+            thread.start()
+            #
+            serialized_kwargs = pickle.dumps(process_single_kwargs)
+            serialized_kwargs = comm.bcast(serialized_kwargs, root=0)
+            all_source_paths = comm.bcast(all_source_paths, root=0)
+            all_destination_paths = comm.bcast(all_destination_paths, root=0)
+            all_metadata_paths = comm.bcast(all_metadata_paths, root=0)
+            #
+            self._mpi4py_process_single_and_save_status(
+                queue=pbar_queue,
+                source_path=all_source_paths[rank],
+                destination_path=all_destination_paths[rank],
+                metadata_path=all_metadata_paths[rank],
+                #  kwargs=process_single_kwargs,
+                serialized_kwargs=pickle.dumps(process_single_kwargs),
+            )
+            pbar_queue.put(None)
+            thread.join()
+
+
+    @classmethod
+    def _run_mpi_threaded_progressbar(
+        cls,
+        queue: QueueType,
+        timeout: float,
+    ):
+        """Run a progress bar in a separate thread under MPI.
+
+        Args:
+            queue (QueueType): The queue to increment the progress bars.
+            timeout (float): How often to update the progress bars in seconds.
+        """
+
+        sample_queue_output = cls.increment_progressbar(queue)
+
+
+        with ExitStack() as stack:
+            if rank == 0:
+                pbars = [
+                    stack.enter_context(
+                        tqdm.tqdm(desc=str(k), unit=str(k)[:1], position=i, unit_scale=True)  # pyright: ignore
+                    )
+                    for i, k in enumerate(sample_queue_output)
+                ]
+            else:
+                pbars = [0 for i, k in enumerate(sample_queue_output)]
+            pvals = np.zeros(len(sample_queue_output), dtype="i")
+
+            while True:
+                item = queue.get()
+                pvals[:] = 0
+
+                if item is None:
+                    break
+
+                for i, value in enumerate(item):
+                    pvals[i] += value
+
+                comm.Allreduce(MPI.IN_PLACE, pvals, op=MPI.SUM)
+
+                if rank == 0:
+                    for pbar, value in zip(pbars, pvals):
+                        pbar.update(value)
+
+                time.sleep(timeout)
+                comm.Barrier()
 
 
 def tokenize_in_parallel(
@@ -243,6 +397,7 @@ def tokenize_in_parallel(
     metadata_dir: Optional[str] = None,
     max_size: int = 1024 * 1024 * 1024,
     dtype: str = "uint16",
+    use_mpi: bool = False,
     debug: bool = False,
 ):
     """
@@ -285,6 +440,20 @@ def tokenize_in_parallel(
     run_hash = hashlib.sha256(("".join(sources) + tokenizer_name_or_path).encode("utf-8")).hexdigest()[:8]
     metadata_dir = metadata_dir or join_path(None, tempfile.gettempdir(), f"dolma-{run_hash}")
 
+
+    if use_mpi:
+        global MPI, comm, rank, worldsize
+        from mpi4py import MPI as _MPI
+        MPI = _MPI
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        worldsize = comm.Get_size()
+        if rank == 0:
+            logger = get_logger(__name__)
+            logger.warn("Using MPI for paralelization.")
+        num_writers = worldsize
+
+
     parallel_writer = MemMapParallelWriter(
         source_prefix=sources,
         # the call action will actually get the first destination and
@@ -300,6 +469,7 @@ def tokenize_in_parallel(
     )
     parallel_writer(
         num_readers=num_readers,
+        use_mpi=use_mpi,
         local_shuffle=local_shuffle,
         ring_size=ring_size,
         max_size=max_size,
