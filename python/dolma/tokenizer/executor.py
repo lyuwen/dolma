@@ -315,7 +315,7 @@ class MemMapParallelWriter(BaseParallelProcessor):
             f.write(datetime.now().isoformat())
 
         queue.put(None)
-        counts = [0 for _ in self.increment_progressbar(queue)]
+        counts = [0 for _ in cls.increment_progressbar(queue)]
         while True:
             item = queue.get()
             if item is None:
