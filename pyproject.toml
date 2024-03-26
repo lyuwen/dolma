@@ -123,6 +123,10 @@ pii = [
     "presidio_analyzer==2.2.32",
     "regex"
 ]
+# extension to use mpi4py
+mpi4py = [
+    "mpi4py==3.1.4",
+]
 # # extension to parse warc files
 # warc = [
 #     "warcio>=1.7.4",
@@ -143,6 +147,7 @@ all = [
     "dolma[dev]",
     "dolma[code]",
     "dolma[pii]",
+    "dolma[mpi4py]",
     # "dolma[warc]",
 ]
 
