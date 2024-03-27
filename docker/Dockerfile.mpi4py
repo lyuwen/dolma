@@ -1,6 +1,7 @@
 FROM ghcr.io/lyuwen/mpich-ucx:4.1.2-mpi4py-py310
+# FROM mpich-ucx:mpi4py-py310
 
-COPY docker/condarc /opt/conda/.condarc
+# COPY docker/condarc /opt/conda/.condarc
 
 SHELL ["/opt/conda/bin/conda", "run", "-n", "base", "/bin/bash", "-c"]
 

@@ -343,16 +343,17 @@ class MemMapParallelWriter(BaseParallelProcessor):
         with ExitStack() as stack:
             pbar_queue = Queue()
             sample_queue_output = self.increment_progressbar(pbar_queue)
-            pbars = [
-                stack.enter_context(
-                    tqdm.tqdm(desc=str(k), unit=str(k)[:1], position=i, unit_scale=True)  # pyright: ignore
+            #  pbars = [
+            #      stack.enter_context(
+            #          tqdm.tqdm(desc=str(k), unit=str(k)[:1], position=i, unit_scale=True)  # pyright: ignore
+            #      )
+            #      for i, k in enumerate(sample_queue_output)
+            #  ]
+            if rank == 0:
+                thread = Thread(
+                    target=self._run_mpi_threaded_progressbar, args=(pbar_queue, self.pbar_timeout), daemon=True
                 )
-                for i, k in enumerate(sample_queue_output)
-            ]
-            thread = Thread(
-                target=self._run_mpi_threaded_progressbar, args=(pbar_queue, self.pbar_timeout), daemon=True
-            )
-            thread.start()
+                thread.start()
             #
             serialized_kwargs = pickle.dumps(process_single_kwargs)
             serialized_kwargs = comm.bcast(serialized_kwargs, root=0)
@@ -369,7 +370,8 @@ class MemMapParallelWriter(BaseParallelProcessor):
                 serialized_kwargs=pickle.dumps(process_single_kwargs),
             )
             pbar_queue.put(None)
-            thread.join()
+            if rank == 0:
+                thread.join()
 
 
     @classmethod
@@ -410,14 +412,14 @@ class MemMapParallelWriter(BaseParallelProcessor):
                 for i, value in enumerate(item):
                     pvals[i] += value
 
-                comm.Allreduce(MPI.IN_PLACE, pvals, op=MPI.SUM)
+                #  comm.Allreduce(MPI.IN_PLACE, pvals, op=MPI.SUM)
 
                 if rank == 0:
                     for pbar, value in zip(pbars, pvals):
                         pbar.update(value)
 
                 time.sleep(timeout)
-                comm.Barrier()
+                #  comm.Barrier()
 
 
 def tokenize_in_parallel(
@@ -491,8 +493,7 @@ def tokenize_in_parallel(
         rank = comm.Get_rank()
         worldsize = comm.Get_size()
         if rank == 0:
-            logger = get_logger(__name__)
-            logger.warn("Using MPI for paralelization.")
+            print("Using MPI for paralelization.")
         num_writers = worldsize
 
 
