@@ -125,14 +125,14 @@ class MemMapParallelWriter(BaseParallelProcessor):
 
         # create the tokenizer from file if it exists, otherwise from pretrained
         if kwargs.get("tiktoken", ""):
-            if rank == 0 and logging_flag[0] == 0:
+            if rank == 0 and logging_flag[1] == 0:
                 print("Using tiktoken tokenizer")
-                logging_flag[0] += 1
+                logging_flag[1] += 1
             tokenizer = import_tokenizer_class(kwargs["tiktoken"])(tokenizer_name_or_path)
         elif kwargs.pop("auto_tokenizer", False):
-            if rank == 0 and logging_flag[0] == 0:
+            if rank == 0 and logging_flag[2] == 0:
                 print("Using HF auto tokenizer")
-                logging_flag[0] += 1
+                logging_flag[2] += 1
             tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
         else:
             if os.path.exists(tokenizer_name_or_path) and os.path.isfile(tokenizer_name_or_path):

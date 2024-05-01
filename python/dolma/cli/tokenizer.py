@@ -214,6 +214,7 @@ class TokenizerCli(BaseCli):
                 seed=parsed_config.seed,
                 metadata_dir=work_dirs.output,
                 max_size=parsed_config.max_size,
+                dtype=parsed_config.dtype,
                 use_mpi=parsed_config.use_mpi,
                 debug=parsed_config.debug,
                 sample_ring_prop=parsed_config.sample_ring_prop,
