@@ -1,3 +1,4 @@
+import importlib
 import hashlib
 import multiprocessing
 import os
@@ -18,6 +19,8 @@ from datetime import datetime
 import numpy as np
 from typing_extensions import TypeAlias
 
+from transformers import AutoTokenizer
+
 from ..core.loggers import get_logger
 from ..core.parallel import BaseParallelProcessor, QueueType
 from ..core.paths import get_size, glob_path, join_path, mkdir_p, parent
@@ -34,11 +37,24 @@ TokenizedSeqsQueueType: TypeAlias = "Queue[List[TokenizerOutput]]"
 PathsQueueType: TypeAlias = "Queue[str]"
 
 
+def import_tokenizer_class(path):
+  if not os.path.isdir(path):
+    path = os.path.join(path, "tokenizer.py")
+  if not os.path.exists(path):
+    raise OSError(f"File {path} not exists.")
+  spec = importlib.util.spec_from_file_location("tokenizer", path)
+  module = importlib.util.module_from_spec(spec)
+  sys.modules[module_name] = module
+  spec.loader.exec_module(module)
+  return module.Tokenizer
+
+
 def sizes_to_probs(sizes: List[int]) -> np.ndarray:
     return np.array(sizes) / sum(sizes)
 
 
 class MemMapParallelWriter(BaseParallelProcessor):
+
     @classmethod
     def increment_progressbar(  # type: ignore[override]    # pylint: disable=arguments-differ
         cls,
@@ -100,10 +116,15 @@ class MemMapParallelWriter(BaseParallelProcessor):
         mm_cnt = 0
 
         # create the tokenizer from file if it exists, otherwise from pretrained
-        if os.path.exists(tokenizer_name_or_path) and os.path.isfile(tokenizer_name_or_path):
-            tokenizer = Tokenizer.from_file(tokenizer_name_or_path, **tokenizer_kwargs)
+        if kwargs.get("tiktoken", None) is not None:
+            tokenizer = import_tokenizer_class(tokenizer_name_or_path)
+        if kwargs.pop("auto_tokenizer", False):
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
         else:
-            tokenizer = Tokenizer.from_pretrained(tokenizer_name_or_path, **tokenizer_kwargs)
+            if os.path.exists(tokenizer_name_or_path) and os.path.isfile(tokenizer_name_or_path):
+                tokenizer = Tokenizer.from_file(tokenizer_name_or_path, **tokenizer_kwargs)
+            else:
+                tokenizer = Tokenizer.from_pretrained(tokenizer_name_or_path, **tokenizer_kwargs)
 
         tokenizer_ring: List[Generator[TokenizerOutput, None, None]] = []
         tokenizer_sizes: List[int] = []
@@ -181,7 +202,7 @@ class MemMapParallelWriter(BaseParallelProcessor):
                     memwriter = stack.enter_context(
                         MemmapWriter(
                             path=destination_path + f"-{mm_cnt:05d}",
-                            dtype=np.dtype("uint16"),  # pyright: ignore
+                            dtype=dtype,  # pyright: ignore
                             max_tokens=max_size,
                         )
                     )
@@ -441,6 +462,7 @@ def tokenize_in_parallel(
     use_mpi: bool = False,
     debug: bool = False,
     sample_ring_prop: bool = False,
+    auto_tokenizer: bool = False,
 ):
     """
     Tokenizes the input sources in parallel using multiple writers and readers.
@@ -523,4 +545,5 @@ def tokenize_in_parallel(
         segment_before_tokenization=segment_before_tokenization,
         tokenizer_name_or_path=tokenizer_name_or_path,
         sample_ring_prop=sample_ring_prop,
+        auto_tokenizer=auto_tokenizer,
     )

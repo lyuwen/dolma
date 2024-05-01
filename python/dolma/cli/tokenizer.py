@@ -34,6 +34,19 @@ class TokenizerConfig:
             "Might not be needed once this bugfix is merged https://github.com/huggingface/tokenizers/pull/1413"
         ),
     )
+    auto_tokenizer: bool = field(
+        default=False,
+        help=(
+            "Use AutoTokenizer from HF transformers library."
+        ),
+    )
+    tiktoken: str = field(
+        default=None,
+        help=(
+            "Use Tiktoken tokenizer. "
+            "A path to or directory containing a tiktoken.py python script defining a Tokenizer class should be passed in."
+        ),
+    )
 
     def __post__init__(self):
         logger = get_logger(__file__)
@@ -206,4 +219,5 @@ class TokenizerCli(BaseCli):
                 use_mpi=parsed_config.use_mpi,
                 debug=parsed_config.debug,
                 sample_ring_prop=parsed_config.sample_ring_prop,
+                auto_tokenizer=parsed_config.auto_tokenizer,
             )
