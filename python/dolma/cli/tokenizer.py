@@ -36,12 +36,10 @@ class TokenizerConfig:
     )
     auto_tokenizer: bool = field(
         default=False,
-        help=(
-            "Use AutoTokenizer from HF transformers library."
-        ),
+        help="Use AutoTokenizer from HF transformers library.",
     )
     tiktoken: str = field(
-        default=None,
+        default="",
         help=(
             "Use Tiktoken tokenizer. "
             "A path to or directory containing a tiktoken.py python script defining a Tokenizer class should be passed in."
@@ -219,5 +217,6 @@ class TokenizerCli(BaseCli):
                 use_mpi=parsed_config.use_mpi,
                 debug=parsed_config.debug,
                 sample_ring_prop=parsed_config.sample_ring_prop,
-                auto_tokenizer=parsed_config.auto_tokenizer,
+                auto_tokenizer=parsed_config.tokenizer.auto_tokenizer,
+                tiktoken=parsed_config.tokenizer.tiktoken,
             )

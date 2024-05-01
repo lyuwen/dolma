@@ -1,3 +1,4 @@
+import sys
 import importlib
 import hashlib
 import multiprocessing
@@ -33,16 +34,19 @@ comm = None
 rank = 0
 worldsize = 1
 
+logging_flag = np.zeros(10, dtype=int)
+
 TokenizedSeqsQueueType: TypeAlias = "Queue[List[TokenizerOutput]]"
 PathsQueueType: TypeAlias = "Queue[str]"
 
 
 def import_tokenizer_class(path):
-  if not os.path.isdir(path):
+  if os.path.isdir(path):
     path = os.path.join(path, "tokenizer.py")
   if not os.path.exists(path):
     raise OSError(f"File {path} not exists.")
-  spec = importlib.util.spec_from_file_location("tokenizer", path)
+  module_name = "tokenizer"
+  spec = importlib.util.spec_from_file_location(module_name, path)
   module = importlib.util.module_from_spec(spec)
   sys.modules[module_name] = module
   spec.loader.exec_module(module)
@@ -115,10 +119,20 @@ class MemMapParallelWriter(BaseParallelProcessor):
         update_interval = 1
         mm_cnt = 0
 
+        if logging_flag[0] == 0:
+            print(f"Using dtype={dtype} for tokens.")
+            logging_flag[0] += 1
+
         # create the tokenizer from file if it exists, otherwise from pretrained
-        if kwargs.get("tiktoken", None) is not None:
-            tokenizer = import_tokenizer_class(tokenizer_name_or_path)
-        if kwargs.pop("auto_tokenizer", False):
+        if kwargs.get("tiktoken", ""):
+            if rank == 0 and logging_flag[0] == 0:
+                print("Using tiktoken tokenizer")
+                logging_flag[0] += 1
+            tokenizer = import_tokenizer_class(kwargs["tiktoken"])(tokenizer_name_or_path)
+        elif kwargs.pop("auto_tokenizer", False):
+            if rank == 0 and logging_flag[0] == 0:
+                print("Using HF auto tokenizer")
+                logging_flag[0] += 1
             tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
         else:
             if os.path.exists(tokenizer_name_or_path) and os.path.isfile(tokenizer_name_or_path):
@@ -463,6 +477,7 @@ def tokenize_in_parallel(
     debug: bool = False,
     sample_ring_prop: bool = False,
     auto_tokenizer: bool = False,
+    tiktoken: str = "",
 ):
     """
     Tokenizes the input sources in parallel using multiple writers and readers.
@@ -546,4 +561,5 @@ def tokenize_in_parallel(
         tokenizer_name_or_path=tokenizer_name_or_path,
         sample_ring_prop=sample_ring_prop,
         auto_tokenizer=auto_tokenizer,
+        tiktoken=tiktoken,
     )
