@@ -1,16 +1,18 @@
-FROM ghcr.io/lyuwen/mpich-ucx:4.1.2-mpi4py-py310
-# FROM mpich-ucx:mpi4py-py310
+# FROM ghcr.io/lyuwen/mpich-ucx:4.1.2-mpi4py-py310
+FROM mpich-ucx:mpi4py-py310
 
-# COPY docker/condarc /opt/conda/.condarc
+COPY docker/condarc /opt/conda/.condarc
 
 SHELL ["/opt/conda/bin/conda", "run", "-n", "base", "/bin/bash", "-c"]
 
-RUN pip install --index-url=https://mirror.nju.edu.cn/pypi/web/simple --no-cache-dir \
+ENV PIP_INDEX_URL=https://mirror.nju.edu.cn/pypi/web/simple
+
+RUN pip install --no-cache-dir \
     "anyascii==0.3.2" "blingfire==0.1.8" "boto3>=1.28" "cached-path==1.5.1" "fasttext-wheel==0.9.2" \
     "fsspec==2023.6.0" "msgspec==0.14.2" "nltk==3.8.1" "omegaconf==2.3.0" "LTpycld2==0.42" \
     "platformdirs==4.2.0" "pyyaml" "requests" "rich" "s3fs==2023.6.0" "smart-open" "tokenizers==0.15.0" \
     "tqdm" "uniseg" "numpy" "necessary==0.4.3" "langdetect==1.0.9" "charset-normalizer==3.2.0" && \
-    pip install --index-url=https://mirror.nju.edu.cn/pypi/web/simple  --no-cache-dir dolma
+    pip install --no-cache-dir dolma transformers tiktoken blobfile zstandard
 
 COPY python/dolma/ /opt/conda/lib/python3.10/site-packages/dolma/
 

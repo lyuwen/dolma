@@ -1,0 +1,3 @@
+FROM dolma:dev-mpi4py
+
+COPY docker/nltk_data/ /usr/local/share/nltk_data/
