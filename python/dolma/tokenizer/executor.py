@@ -27,7 +27,13 @@ from ..core.parallel import BaseParallelProcessor, QueueType
 from ..core.paths import get_size, glob_path, join_path, mkdir_p, parent
 from .data_types import TokenizerOutput  # pylint: disable=unused-import
 from .memmap_writer import MemmapWriter
-from .tokenizer import Tokenizer, tokenize_file
+from .tokenizer import (
+    Tokenizer,
+    tokenize_file,
+    tokenize_file_wfield,
+    tokenize_file_parquet,
+    tokenize_file_lines,
+    )
 
 MPI = None
 comm = None
@@ -38,6 +44,13 @@ logging_flag = np.zeros(10, dtype=int)
 
 TokenizedSeqsQueueType: TypeAlias = "Queue[List[TokenizerOutput]]"
 PathsQueueType: TypeAlias = "Queue[str]"
+
+
+tokenize_file_map = {
+    "jsonl": tokenize_file_wfield,
+    "parquet": tokenize_file_parquet,
+    "lines": tokenize_file_lines,
+    }
 
 
 def import_tokenizer_class(path):
@@ -139,12 +152,15 @@ class MemMapParallelWriter(BaseParallelProcessor):
                 tokenizer = Tokenizer.from_file(tokenizer_name_or_path, **tokenizer_kwargs)
             else:
                 tokenizer = Tokenizer.from_pretrained(tokenizer_name_or_path, **tokenizer_kwargs)
+        text_field = kwargs.get("text_field", "text")
+        data_format = kwargs.get("data_format", "text")
 
         tokenizer_ring: List[Generator[TokenizerOutput, None, None]] = []
         tokenizer_sizes: List[int] = []
         for _ in range(min(ring_size, len(source_paths))):
             path = source_paths.pop()
-            tokenizer_ring.append(tokenize_file(tokenizer=tokenizer, path=path))
+            tokenizer_ring.append(tokenize_file_map[data_format](tokenizer=tokenizer, path=path, text_field=text_field))
+            #  tokenizer_ring.append(tokenize_file(tokenizer=tokenizer, path=path))
             tokenizer_sizes.append(get_size(path))
 
         # this is the probabilities with which we sample from the ring buffer if sample_ring_prop is True
@@ -188,7 +204,8 @@ class MemMapParallelWriter(BaseParallelProcessor):
                             break
                         if len(source_paths) > 0:
                             path = source_paths.pop()
-                            tokenizer_ring.append(tokenize_file(tokenizer=tokenizer, path=path))
+                            tokenizer_ring.append(tokenize_file_map[data_format](tokenizer=tokenizer, path=path, text_field=text_field))
+                            #  tokenizer_ring.append(tokenize_file(tokenizer=tokenizer, path=path))
                             tokenizer_sizes.append(get_size(path))
 
                         # wether a file is added or not to the ring, we must re-balance probabilities
@@ -474,6 +491,8 @@ def tokenize_in_parallel(
     max_size: int = 1024 * 1024 * 1024,
     dtype: str = "uint16",
     use_mpi: bool = False,
+    text_field: str = "text",
+    data_format: str = "jsonl",
     debug: bool = False,
     sample_ring_prop: bool = False,
     auto_tokenizer: bool = False,
@@ -562,4 +581,6 @@ def tokenize_in_parallel(
         sample_ring_prop=sample_ring_prop,
         auto_tokenizer=auto_tokenizer,
         tiktoken=tiktoken,
+        text_field=text_field,
+        data_format=data_format,
     )

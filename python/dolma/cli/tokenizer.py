@@ -155,6 +155,14 @@ class TokenizationConfig:
         default=False,
         help="If true, use MPI for parallel computation.",
     )
+    text_field: str = field(
+        default="text",
+        help="The column name of text to tokenize.",
+    )
+    data_format: str = field(
+        default="jsonl",
+        help="The input data format, supports [jsonl, parquet, lines].",
+    )
 
 
 class TokenizerCli(BaseCli):
@@ -216,6 +224,8 @@ class TokenizerCli(BaseCli):
                 max_size=parsed_config.max_size,
                 dtype=parsed_config.dtype,
                 use_mpi=parsed_config.use_mpi,
+                text_field=parsed_config.text_field,
+                data_format=parsed_config.data_format,
                 debug=parsed_config.debug,
                 sample_ring_prop=parsed_config.sample_ring_prop,
                 auto_tokenizer=parsed_config.tokenizer.auto_tokenizer,

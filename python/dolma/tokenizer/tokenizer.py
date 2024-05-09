@@ -14,6 +14,7 @@ import msgspec
 import smart_open
 from omegaconf import DictConfig
 from tokenizers import Tokenizer as BaseTokenizer
+import pyarrow.parquet as pq
 
 from ..core.errors import DolmaConfigError
 from ..core.loggers import get_logger
@@ -305,6 +306,56 @@ def tokenize_file(tokenizer: Tokenizer, path: str) -> Generator[TokenizerOutput,
                     # skip empty docs
                     tokens = tokenizer.encode(text, add_special_tokens=True)
                     yield TokenizerOutput.from_tokens(id=row.id, src=path, loc=i, tokens=tokens)
+                i += 1
+            except Exception as ex:
+                logger.error("Error processing %s:%d", path, i, exc_info=ex)
+
+
+def tokenize_file_wfield(tokenizer: Tokenizer, path: str, text_field: str="text", id_field: str="id") -> Generator[TokenizerOutput, None, None]:
+    """Tokenize a file of documents using the provided tokenizer; file is expected to be a gzipped JSON lines
+    file, each containing a field name given by text_field and id from id_field.
+    """
+    with smart_open.open(path, mode="rt") as input_stream:
+        for i, line in enumerate(input_stream, start=1):
+            try:
+                row = msgspec.json.decode(line)
+                if text := row[text_field].strip():
+                    # skip empty docs
+                    tokens = tokenizer.encode(text, add_special_tokens=True)
+                    yield TokenizerOutput.from_tokens(id=row.get(id_field, f"{path}-{i}"), src=path, loc=i, tokens=tokens)
+                i += 1
+            except Exception as ex:
+                logger.error("Error processing %s:%d", path, i, exc_info=ex)
+
+
+def tokenize_file_parquet(tokenizer: Tokenizer, path: str, text_field: str="text", id_field: str="id") -> Generator[TokenizerOutput, None, None]:
+    """Tokenize a file of documents using the provided tokenizer; file is expected to be a gzipped JSON lines
+    file, each containing a field name given by text_field and id from id_field.
+    """
+    with pq.ParquetFile(path) as input_stream:
+        for i, line in enumerate(input_stream.iter_batches(batch_size=1), start=1):
+            try:
+                row = line.to_pylist()[0]
+                if text := row[text_field].strip():
+                    # skip empty docs
+                    tokens = tokenizer.encode(text, add_special_tokens=True)
+                    yield TokenizerOutput.from_tokens(id=row.get(id_field, f"{path}-{i}"), src=path, loc=i, tokens=tokens)
+                i += 1
+            except Exception as ex:
+                logger.error("Error processing %s:%d", path, i, exc_info=ex)
+
+
+def tokenize_file_lines(tokenizer: Tokenizer, path: str, text_field: str="text", id_field: str="id") -> Generator[TokenizerOutput, None, None]:
+    """Tokenize a file of documents using the provided tokenizer; file is expected to be a gzipped JSON lines
+    file, each containing a field name given by text_field and id from id_field.
+    """
+    with smart_open.open(path, mode="rt", encoding='utf-8') as input_stream:
+        for i, line in enumerate(input_stream, start=1):
+            try:
+                if text := line.strip():
+                    # skip empty docs
+                    tokens = tokenizer.encode(text, add_special_tokens=True)
+                    yield TokenizerOutput.from_tokens(id=f"{path}-{i}", src=path, loc=i, tokens=tokens)
                 i += 1
             except Exception as ex:
                 logger.error("Error processing %s:%d", path, i, exc_info=ex)
