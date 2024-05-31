@@ -54,6 +54,7 @@ class StreamConfig:
     output: StreamOutputConfig = field(
         default=StreamOutputConfig(), help="Configuration for the output of the stream."
     )
+    text_field: str = field(default="text", help="Text field for the main content.")
     attributes: List[str] = field(default=[], help="List of attributes files to used for mixing.")
     filter: Optional[FilterConfig] = field(  # pyright: ignore
         default=None, help="Configuration for filtering documents."
@@ -66,6 +67,7 @@ class MixerConfig:
     streams: List[StreamConfig] = field(default=[], help="List configurations of streams to be mixed")
     work_dir: WorkDirConfig = field(default=WorkDirConfig(), help="Configuration for temporary work directories.")
     processes: int = field(default=1, help="Number of processes to use for mixing. By default 1 process is used.")
+    use_parquet: bool = field(default=False, help="Use parquet version of the converter.")
     dryrun: bool = field(
         default=False,
         help="If true, only print the configuration and exit without running the mixer.",
@@ -85,6 +87,7 @@ class MixerCli(BaseCli):
                 "work_dir": {"input": str(work_dirs.input), "output": str(work_dirs.output)},
                 "processes": int(parsed_config.processes),
                 "streams": [],
+                "use_parquet": bool(parsed_config.use_parquet),
             }
 
             for stream_config in parsed_config.streams:
@@ -152,6 +155,7 @@ class MixerCli(BaseCli):
 
                 # populate the stream config dict
                 stream_config_dict["name"] = stream_config.name
+                stream_config_dict["text_field"] = stream_config.text_field
                 stream_config_dict["documents"] = [str(d) for d in stream_config.documents]
                 stream_config_dict["attributes"] = [str(a) for a in list(stream_config.attributes)]
                 stream_config_dict["output"] = {

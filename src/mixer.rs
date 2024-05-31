@@ -9,7 +9,14 @@ use crate::shard::Shard;
 use mixer_config::*;
 
 pub fn run(config: MixerConfig) -> Result<u32, u32> {
-    let shards = Shard::split_streams(&config.streams).unwrap();
+    let shards: Vec<Shard>;
+    if config.use_parquet.unwrap_or(false) {
+        log::info!("Using the parquet version of the sharded mixer.");
+        shards = Shard::split_streams_parquet(&config.streams).unwrap();
+    } else {
+        log::info!("Using the json.gz version of the sharded mixer.");
+        shards = Shard::split_streams(&config.streams).unwrap();
+    }
 
     let threadpool = ThreadPool::new(config.processes);
     let failed_shard_count_ref = Arc::new(AtomicU32::new(0));
@@ -23,13 +30,23 @@ pub fn run(config: MixerConfig) -> Result<u32, u32> {
         let work_dirs = config.work_dir.clone();
         let failed_shard_count_ref = failed_shard_count_ref.clone();
 
-        threadpool.execute(move || {
-            log::info!("Building output {:?}...", shard.output);
-            if let Err(e) = shard.clone().process(work_dirs) {
-                log::error!("Error processing {:?}: {}", shard.output, e);
-                failed_shard_count_ref.fetch_add(1, Ordering::Relaxed);
-            }
-        });
+        if config.use_parquet.unwrap_or(false) {
+            threadpool.execute(move || {
+                log::info!("Building output {:?}...", shard.output);
+                if let Err(e) = shard.clone().process_parquet(work_dirs) {
+                    log::error!("Error processing {:?}: {}", shard.output, e);
+                    failed_shard_count_ref.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        } else {
+            threadpool.execute(move || {
+                log::info!("Building output {:?}...", shard.output);
+                if let Err(e) = shard.clone().process(work_dirs) {
+                    log::error!("Error processing {:?}: {}", shard.output, e);
+                    failed_shard_count_ref.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        }
     }
     threadpool.join();
 
@@ -55,6 +72,7 @@ pub mod mixer_config {
         pub streams: Vec<StreamConfig>,
         pub processes: usize,
         pub work_dir: WorkDirConfig,
+        pub use_parquet: Option<bool>,
     }
 
     impl MixerConfig {

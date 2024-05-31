@@ -2,6 +2,7 @@ use std::fs::OpenOptions;
 use std::io;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::str;
 
 use aws_sdk_s3::Client as S3Client;
 use flate2::read::MultiGzDecoder;
@@ -10,6 +11,10 @@ use flate2::Compression;
 use glob::glob;
 use rayon::prelude::*;
 use serde_json::Value;
+// use zstd::stream::read::Encoder as zstdEncoder;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use arrow::array::as_string_array;
 
 use crate::filters::DocFilter;
 use crate::s3_util;
@@ -25,6 +30,7 @@ pub struct Shard {
     pub span_replacements: Option<Vec<SpanReplacementConfig>>,
     pub discard_fields: Option<Vec<String>>,
     pub min_text_length: Option<usize>,
+    pub text_field: String,
 }
 
 // A collection of paths to a document file and corresponding attribute files.
@@ -87,6 +93,7 @@ impl Shard {
                         span_replacements: stream_config.span_replacement.clone(),
                         discard_fields: stream_config.output.discard_fields.clone(),
                         min_text_length: stream_config.output.min_text_length.clone(),
+                        text_field: stream_config.text_field.clone().unwrap_or("text".to_string()),
                     };
                     shards.push(shard);
                     stream_shard_count += 1;
@@ -107,6 +114,7 @@ impl Shard {
                     span_replacements: stream_config.span_replacement.clone(),
                     discard_fields: stream_config.output.discard_fields.clone(),
                     min_text_length: stream_config.output.min_text_length.clone(),
+                    text_field: stream_config.text_field.clone().unwrap_or("text".to_string()),
                 };
                 shards.push(shard);
                 stream_shard_count += 1;
@@ -204,6 +212,398 @@ impl Shard {
                     line_number += 1;
                     let line = line?;
                     let mut data: Value = serde_json::from_str(&line)?;
+                    let mut attrs = serde_json::Map::new();
+                    for (attr_reader_index, (_, attr_reader)) in
+                        local_attr_readers.iter_mut().enumerate()
+                    {
+                        match attr_reader.next() {
+                            Some(Ok(line)) => {
+                                let attr_data: Value = serde_json::from_str(&line)?;
+
+                                // raise an error if there if the id from attributes and the id from
+                                // the data do not match
+                                if attr_data["id"] != data["id"] {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::Other,
+                                        format!(
+                                            "Mismatched ids for line {} of {}: {} != {}",
+                                            line_number,
+                                            &input_path.doc_path,
+                                            attr_data["id"],
+                                            data["id"]
+                                        ),
+                                    ));
+                                }
+
+                                // raise an error if there is no attribute key
+                                if !attr_data["attributes"].is_object() {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::Other,
+                                        format!(
+                                            "Missing attributes for line {} of {}",
+                                            line_number, &input_path.doc_path
+                                        ),
+                                    ));
+                                }
+
+                                for (k, v) in attr_data["attributes"].as_object().unwrap().iter() {
+                                    attrs.insert(k.clone(), v.clone());
+                                }
+                            }
+                            Some(Err(e)) => {
+                                if attr_reader_failure_counts[attr_reader_index] == 0 {
+                                    log::warn!(
+                                        "Error reading attributes from {} at line {}: {}",
+                                        input_path.attribute_paths[attr_reader_index],
+                                        line_number,
+                                        e
+                                    );
+                                }
+                                attr_reader_failure_counts[attr_reader_index] += 1;
+                                break;
+                            }
+                            None => {
+                                if attr_reader_failure_counts[attr_reader_index] == 0 {
+                                    log::warn!(
+                                        "Missing attributes from {} at line {}",
+                                        input_path.attribute_paths[attr_reader_index],
+                                        line_number
+                                    );
+                                }
+                                attr_reader_failure_counts[attr_reader_index] += 1;
+                                break;
+                            }
+                        }
+                    }
+
+                    if !attrs.is_empty() {
+                        // Add to existing attributes if they exist, otherwise create them.
+                        if let Value::Object(ref mut existing_attrs) = data["attributes"] {
+                            for (k, v) in attrs.iter() {
+                                existing_attrs.insert(k.clone(), v.clone());
+                            }
+                        } else {
+                            data["attributes"] = Value::Object(attrs);
+                        }
+                    }
+
+                    let should_write = doc_filters
+                        .should_keep(&data)
+                        .map_err(|s| io::Error::new(io::ErrorKind::Other, s))?;
+
+                    if should_write {
+                        // if self.span_replacements.is_some() {
+                        // let mut replacements = self
+                        //     .span_replacements
+                        //     .as_ref()
+                        //     .unwrap()
+                        //     .iter()
+                        //     .flat_map(|r| r.find_spans_to_replace(&data).unwrap())
+                        //     .collect::<Vec<SpanReplacement>>();
+
+                        let mut replacements = span_replacers
+                            .iter()
+                            .map(|replacer| replacer.find_spans_to_replace(&data))
+                            .collect::<Result<Vec<Vec<SpanReplacement>>, io::Error>>()?
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<SpanReplacement>>();
+
+                        if !replacements.is_empty() {
+                            replacements.sort_by(|a, b| a.start.cmp(&b.start));
+
+                            let mut new_text = String::new();
+                            let old_text = data[self.text_field.clone()].as_str().unwrap().to_owned();
+                            let mut span_index = 0;
+                            let mut i = 0;
+                            let mut span_start_byte_index = 0;
+                            let mut chars = old_text.char_indices();
+                            let mut byte_index_with_char = chars.next();
+                            while byte_index_with_char.is_some() {
+                                let (byte_index, c) = byte_index_with_char.unwrap();
+                                if span_index < replacements.len() {
+                                    let is_inside_span = i >= replacements[span_index].start
+                                        && i < replacements[span_index].end;
+                                    if i == replacements[span_index].start {
+                                        span_start_byte_index = byte_index;
+                                    }
+                                    if !is_inside_span {
+                                        if i == replacements[span_index].end {
+                                            if !replacements[span_index].replacement.is_empty() {
+                                                let replacement_text = replacements[span_index]
+                                                    .replacement
+                                                    .to_owned()
+                                                    .replace(
+                                                        "{}",
+                                                        old_text[span_start_byte_index..byte_index]
+                                                            .to_owned()
+                                                            .as_str(),
+                                                    );
+                                                new_text.push_str(&replacement_text);
+                                            }
+                                            while span_index < replacements.len()
+                                                && replacements[span_index].start < i
+                                            {
+                                                span_index += 1;
+                                            }
+                                        }
+                                        if span_index < replacements.len()
+                                            && replacements[span_index].start == i
+                                        {
+                                            span_start_byte_index = byte_index;
+                                        } else {
+                                            new_text.push(c);
+                                        }
+                                    }
+                                } else {
+                                    new_text.push(c);
+                                }
+                                i += 1;
+                                byte_index_with_char = chars.next();
+                            }
+                            if span_index < replacements.len()
+                                && !replacements[span_index].replacement.is_empty()
+                            {
+                                let replacement_text =
+                                    replacements[span_index].replacement.to_owned().replace(
+                                        "{}",
+                                        old_text[span_start_byte_index..].to_owned().as_str(),
+                                    );
+                                new_text.push_str(&replacement_text);
+                            }
+                            data["text"] = Value::String(new_text);
+                        }
+                        // }
+                        for f in self.discard_fields.iter().flatten() {
+                            data.as_object_mut().unwrap().remove(f);
+                        }
+
+                        // length of text after cleanup
+                        let curr_text_length: usize = data["text"].as_str().unwrap().trim().len();
+
+                        // If min_text_length is not set, default to 0
+                        if curr_text_length >= min_text_length {
+                            let provenance_string = Value::String(format!(
+                                "{}:{}",
+                                Path::new(&input_path.doc_path)
+                                    .file_name()
+                                    .unwrap()
+                                    .to_str()
+                                    .unwrap(),
+                                line_number
+                            ));
+
+                            // provenance string is assigned to a key of data["metadata"]
+                            // if "metadata" is a key in data; otherwise, create "metadata"
+                            // and add provenance to it
+                            if !data["metadata"].is_object() {
+                                data["metadata"] = Value::Object(serde_json::Map::new());
+                            }
+                            data["metadata"]["provenance"] = provenance_string;
+
+                            lines_written += 1;
+                            serde_json::to_writer(&mut writer, &data)?;
+                            writer.write_all(b"\n")?;
+                        }
+                    }
+                }
+                cache.finalize_input(&input_path.doc_path)?;
+                for (index, attribute_path) in input_path.attribute_paths.iter().enumerate() {
+                    let failure_count = attr_reader_failure_counts[index];
+                    if failure_count > 0 {
+                        log::warn!(
+                            "Failed to read {} attributes from {}",
+                            attribute_path,
+                            failure_count
+                        );
+                    }
+                    cache.finalize_input(attribute_path)?;
+                }
+                log::info!(
+                    "Dropped {} of {} documents from {}",
+                    line_number - lines_written,
+                    line_number,
+                    &input_path.doc_path
+                );
+            }
+        }
+        cache.finalize_output(&self.output)?;
+        Ok(())
+    }
+
+
+    pub fn split_streams_parquet(streams: &Vec<StreamConfig>) -> Result<Vec<Shard>, io::Error> {
+        let mut shards: Vec<Shard> = Vec::new();
+        for stream_config in streams {
+            let mut stream_shard_count = 0;
+            log::info!("Computing shards for stream {}...", stream_config.name);
+            let stream_inputs = find_objects_matching_patterns(&stream_config.documents)?;
+            let input_count = stream_inputs.len();
+            let input_sizes = get_object_sizes(&stream_inputs)?;
+            let inputs_with_sizes = std::iter::zip(stream_inputs, input_sizes)
+                .map(|(input, size)| {
+                    let mut attr_paths = Vec::new();
+                    for prefix in stream_config.attributes.iter() {
+                        let attr_prefix = format!("/attributes/{}/", prefix);
+                        let mut attr_path = input.replace("/documents/", &attr_prefix);
+                        attr_path = attr_path.replace(".parquet", ".json.gz");
+                        attr_paths.push(attr_path);
+                    }
+                    (
+                        DocumentPaths {
+                            doc_path: input,
+                            attribute_paths: attr_paths,
+                        },
+                        size,
+                    )
+                })
+                .collect::<Vec<(DocumentPaths, usize)>>();
+            let mut shard_size = inputs_with_sizes[0].1;
+            let mut shard_inputs: Vec<DocumentPaths> = vec![inputs_with_sizes[0].0.clone()];
+            for (input, size) in inputs_with_sizes[1..].iter() {
+                if *size == 0 {
+                    log::warn!(
+                        "Skipping input {}. Could not determine size",
+                        input.doc_path
+                    );
+                    continue;
+                }
+                shard_size += size;
+                if shard_size > stream_config.output.max_size_in_bytes {
+                    let output = format!(
+                        "{}/{}-{:04}.json.gz",
+                        stream_config.output.path, stream_config.name, stream_shard_count
+                    );
+                    let shard: Shard = Shard {
+                        inputs: shard_inputs.clone(),
+                        output: output.clone(),
+                        filter: stream_config.filter.clone(),
+                        span_replacements: stream_config.span_replacement.clone(),
+                        discard_fields: stream_config.output.discard_fields.clone(),
+                        min_text_length: stream_config.output.min_text_length.clone(),
+                        text_field: stream_config.text_field.clone().unwrap_or("text".to_string()),
+                    };
+                    shards.push(shard);
+                    stream_shard_count += 1;
+                    shard_size = *size;
+                    shard_inputs = Vec::new();
+                }
+                shard_inputs.push(input.clone());
+            }
+            if !shard_inputs.is_empty() {
+                let output = format!(
+                    "{}/{}-{:04}.json.gz",
+                    stream_config.output.path, stream_config.name, stream_shard_count
+                );
+                let shard = Shard {
+                    inputs: shard_inputs.clone(),
+                    output: output.clone(),
+                    filter: stream_config.filter.clone(),
+                    span_replacements: stream_config.span_replacement.clone(),
+                    discard_fields: stream_config.output.discard_fields.clone(),
+                    min_text_length: stream_config.output.min_text_length.clone(),
+                    text_field: stream_config.text_field.clone().unwrap_or("text".to_string()),
+                };
+                shards.push(shard);
+                stream_shard_count += 1;
+            }
+            log::info!(
+                "Splitting {} files for {} into {} shards",
+                input_count,
+                stream_config.name,
+                stream_shard_count
+            );
+        }
+
+        Ok(shards)
+    }
+
+
+    pub fn process_parquet(&self, work_dirs: WorkDirConfig) -> Result<(), io::Error> {
+        let cache = FileCache {
+            s3_client: Box::new(s3_util::new_client(None)?),
+            work: work_dirs.clone(),
+        };
+        let min_text_length = self.min_text_length.clone().unwrap_or(0);
+
+        let output_path: PathBuf = cache.prepare_output(&self.output)?;
+        {
+            let output_file = OpenOptions::new()
+                .read(false)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(output_path.clone())?;
+
+            let mut writer = BufWriter::with_capacity(
+                1024 * 1024,
+                //GzEncoder::new(output_file, 0),
+                GzEncoder::new(output_file, Compression::default()),
+            );
+
+            for input_path in self.inputs.iter() {
+                log::info!("Merging {} into {}", input_path.doc_path, self.output);
+                let local_docs_file = cache.prepare_input(&input_path.doc_path)?;
+                let mut local_attr_readers = Vec::new();
+                let mut attr_reader_failure_counts = Vec::new();
+                for attr in &input_path.attribute_paths {
+                    let local_attr_file = cache.prepare_input(attr)?;
+                    let f = OpenOptions::new()
+                        .read(true)
+                        .write(false)
+                        .create(false)
+                        .open(&local_attr_file)?;
+                    let attr_reader = BufReader::with_capacity(1024 * 1024, MultiGzDecoder::new(f));
+                    local_attr_readers.push((local_attr_file, attr_reader.lines()));
+                    attr_reader_failure_counts.push(0);
+                }
+                let input_file = OpenOptions::new()
+                    .read(true)
+                    .write(false)
+                    .create(false)
+                    .open(&local_docs_file)?;
+                let builder = ParquetRecordBatchReaderBuilder::try_new(input_file).unwrap();
+                let reader: ParquetRecordBatchReader = builder.with_batch_size(1).build().unwrap();
+                //let reader = BufReader::with_capacity(1024 * 1024, MultiGzDecoder::new(input_file));
+
+                let mut line_number = 0;
+                let mut lines_written = 0;
+
+                // using the doc filters later to determine if we should keep the document
+                let doc_filters = DocFilter::new(self.filter.as_ref())?;
+
+                // we have to create list of span replaces, potentially dealing with the fact
+                // there might not be any span replacements
+                let span_replacers = self
+                    .span_replacements
+                    .as_ref()
+                    .unwrap_or(&Vec::new())
+                    .iter()
+                    .map(|cfg| SpanReplacer::new(cfg))
+                    .collect::<Vec<SpanReplacer>>();
+
+                for line in reader {
+                    match line {
+                        Ok(_) => {}
+                        Err(e) => {
+                            log::error!(
+                                "Error reading line {} of {}: {}",
+                                line_number,
+                                &input_path.doc_path,
+                                e
+                            );
+                            break;
+                        }
+                    }
+                    line_number += 1;
+                    let line = line.unwrap();
+                    assert_eq!(line.num_rows(), 1);
+                    // let mut data: Value = serde_json::from_str(&line)?;
+                    let mut data: Value = serde_json::Map::new().into();
+                    data["id"] = as_string_array(&line.column_by_name("id").unwrap()).value(0).into();
+                    data["text"] = as_string_array(&line.column_by_name(&self.text_field).unwrap()).value(0).into();
+                    // data["id"] = str::from_utf8(as_string_array(&line.column_by_name("id").unwrap()).value(0)).unwrap();
+                    // data["text"] = str::from_utf8(as_string_array(&line.column_by_name(&self.text_field).unwrap()).value(0)).unwrap();
                     let mut attrs = serde_json::Map::new();
                     for (attr_reader_index, (_, attr_reader)) in
                         local_attr_readers.iter_mut().enumerate()
@@ -443,6 +843,7 @@ pub mod shard_config {
         // span replacement
         pub span_replacement: Option<Vec<SpanReplacementConfig>>,
         pub output: StreamOutputConfig,
+        pub text_field: Option<String>,
     }
 
     #[derive(Serialize, Deserialize, Clone)]
