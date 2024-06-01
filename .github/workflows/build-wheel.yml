@@ -36,4 +36,4 @@ jobs:
       uses: actions/upload-artifact@v2
       with:
         name: python-${{ matrix.python-version }}
-        path: ${{ GITHUB_WORKSPACE }}/dist
+        path: dist/
