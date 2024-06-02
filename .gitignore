@@ -17,7 +17,6 @@ pip-wheel-metadata/
 .vscode/
 /*.iml
 
-
 # jupyter notebooks
 
 .ipynb_checkpoints
@@ -63,7 +62,6 @@ target/
 
 # ignoring test output
 /tests/work/
-/python/dolma/core/warc
 
 # ignore vscode directory
 .vscode
