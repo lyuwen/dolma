@@ -1,0 +1,16 @@
+streams:
+    - name: testing
+      documents:
+        - v0/documents/*.parquet
+
+      text_field: "text"
+      output:
+        path: output/documents
+        max_size_in_bytes: 1_000_000_000
+      attributes:
+        - exp
+      filter:
+        include:
+          - "$.attributes[?(@.exp__random_number_v1__random[0][0] < 0.5)]"
+use_parquet: true
+processes: 1
