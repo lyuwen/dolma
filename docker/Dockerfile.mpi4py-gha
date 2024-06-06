@@ -15,8 +15,9 @@ RUN pip install --no-cache-dir \
     pip install --no-cache-dir transformers tiktoken blobfile zstandard pyarrow
 
 COPY dolma-1.0.3-cp310-cp310-linux_x86_64.whl /tmp/dolma-1.0.3-cp310-cp310-linux_x86_64.whl
-RUN pip install --no-cache-dir /tmp/dolma-1.0.3-cp310-cp310-linux_x86_64.whl && \
-      rm -f /tmp/dolma-1.0.3-cp310-cp310-linux_x86_64.whl && \
+RUN cp -a /tmp/dolma-1.0.3-cp310-cp310-linux_x86_64.whl /tmp/custom-dolma-1.0.3-cp310-cp310-linux_x86_64.whl && \
+      pip install --no-cache-dir -f /tmp custom-dolma[all] && \
+      rm -f /tmp/dolma-1.0.3-cp310-cp310-linux_x86_64.whl /tmp/custom-dolma-1.0.3-cp310-cp310-linux_x86_64.whl && \
       python -m nltk.downloader -d /usr/local/share/nltk_data all
 
 
