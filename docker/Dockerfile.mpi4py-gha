@@ -1,5 +1,5 @@
-# FROM ghcr.io/lyuwen/mpich-ucx:4.1.2-mpi4py-py310
-FROM mpich-ucx:mpi4py-py310
+FROM ghcr.io/lyuwen/mpich-ucx:4.1.2-mpi4py-py310
+# FROM mpich-ucx:mpi4py-py310
 
 COPY docker/condarc /opt/conda/.condarc
 
@@ -12,9 +12,9 @@ RUN pip install --no-cache-dir \
     "fsspec==2023.6.0" "msgspec==0.14.2" "nltk==3.8.1" "omegaconf==2.3.0" "LTpycld2==0.42" \
     "platformdirs==4.2.0" "pyyaml" "requests" "rich" "s3fs==2023.6.0" "smart-open" "tokenizers==0.15.0" \
     "tqdm" "uniseg" "numpy" "necessary==0.4.3" "langdetect==1.0.9" "charset-normalizer==3.2.0" && \
-    pip install --no-cache-dir dolma transformers tiktoken blobfile zstandard pyarrow
+    pip install --no-cache-dir transformers tiktoken blobfile zstandard pyarrow
 
-COPY python-3.10-ubuntu-22.04/dolma-1.0.3-cp310-cp310-linux_x86_64.whl /tmp/dolma-1.0.3-cp310-cp310-linux_x86_64.whl
+COPY dolma-1.0.3-cp310-cp310-linux_x86_64.whl /tmp/dolma-1.0.3-cp310-cp310-linux_x86_64.whl
 RUN pip install --no-cache-dir /tmp/dolma-1.0.3-cp310-cp310-linux_x86_64.whl && \
       rm -f /tmp/dolma-1.0.3-cp310-cp310-linux_x86_64.whl && \
       python -m nltk.downloader -d /usr/local/share/nltk_data all
