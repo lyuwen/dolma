@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir \
     "fsspec==2023.6.0" "msgspec==0.14.2" "nltk==3.8.1" "omegaconf==2.3.0" "LTpycld2==0.42" \
     "platformdirs==4.2.0" "pyyaml" "requests" "rich" "s3fs==2023.6.0" "smart-open" "tokenizers==0.15.0" \
     "tqdm" "uniseg" "numpy" "necessary==0.4.3" "langdetect==1.0.9" "charset-normalizer==3.2.0" && \
-    pip install --no-cache-dir transformers tiktoken blobfile zstandard pyarrow
+    pip install --no-cache-dir -U transformers tiktoken blobfile zstandard pyarrow huggingface-hub
 
 COPY dolma-1.0.3-cp310-cp310-linux_x86_64.whl /tmp/dolma-1.0.3-cp310-cp310-linux_x86_64.whl
 RUN   pip install --no-cache-dir 'dolma[all] @ file:///tmp/dolma-1.0.3-cp310-cp310-linux_x86_64.whl' && \
